@@ -1,9 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <link rel="manifest" href="./manifest.webmanifest">
-  <meta name="theme-color" content="#111111">
-
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
   <title>Nymph</title>
@@ -181,6 +178,22 @@
       if (!/^https?:\/\//i.test(s)) s = 'https://' + s.replace(/^\/+/, '');
       return s;
     }
+    let editingId = null;
+    function beginEdit(id) {
+      const item = getManualEntries().find(x => String(x.id) === String(id));
+      if (!item) return;
+      editingId = item.id;
+      show('manualScreen');
+      qs('linkInput').value = item.lastLink || '';
+      qs('remarksInput').value = item.remarks || '';
+      qs('dateInput').value = item.dateISO || '';
+      qs('timeInput').value = item.time || '';
+      qs('saveBtn').textContent = 'Update entry';
+    }
+    function clearEditMode() {
+      editingId = null;
+      qs('saveBtn').textContent = 'Save entry';
+    }
     function renderToyGrid() {
       qs('toyGrid').innerHTML = TOYS.map(t => `
         <button class="toy ${selectedToys.has(t.id) ? 'selected' : ''}" onclick="toggleToy('${t.id}')" type="button">
@@ -296,6 +309,7 @@
                 <h3>${s.lastLink ? `<a href="${escapeHtml(s.lastLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>` : 'No link saved'}</h3>
                 <div class="meta">${escapeHtml(s.dateLabel)}${s.time ? ' · ' + escapeHtml(s.time) : ''} · Score: ${escapeHtml(s.score || '—')}${counts[s.dateISO] > 1 ? ' · multi-session day' : ''}</div>
                 <div class="meta">${s.lastLink ? escapeHtml(s.lastLink) : 'No URL stored'}</div>
+                <div style="margin-top:8px"><button type="button" class="btn" onclick="beginEdit('${escapeHtml(s.id)}')">Edit</button></div>
               </div>
             </div>
             ${tags}
@@ -320,10 +334,5 @@
     renderToyGrid();
     renderScoreGrid();
   </script>
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(()=>{}));
-}
-</script>
 </body>
 </html>
