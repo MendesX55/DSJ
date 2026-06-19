@@ -179,20 +179,47 @@
       return s;
     }
     let editingId = null;
+    function setSaveLabel(editing) { qs('saveBtn').textContent = editing ? 'Update entry' : 'Save entry'; }
     function beginEdit(id) {
       const item = getManualEntries().find(x => String(x.id) === String(id));
       if (!item) return;
       editingId = item.id;
-      show('manualScreen');
       qs('linkInput').value = item.lastLink || '';
       qs('remarksInput').value = item.remarks || '';
       qs('dateInput').value = item.dateISO || '';
       qs('timeInput').value = item.time || '';
-      qs('saveBtn').textContent = 'Update entry';
+      setSaveLabel(true);
+      show('manualScreen');
     }
-    function clearEditMode() {
-      editingId = null;
-      qs('saveBtn').textContent = 'Save entry';
+    function clearEditMode() { editingId = null; setSaveLabel(false); }
+    async function fetchPageMeta(url) {
+      const normalized = normalizeUrl(url);
+      if (!normalized) return null;
+      try {
+        const res = await fetch('https://r.jina.ai/http://' + normalized.replace(/^https?:\/\//,''), { cache:'no-store' });
+        const raw = await res.text();
+        const grab = (patterns) => { for (const re of patterns) { const m = raw.match(re); if (m && m[1]) return m[1].trim(); } return ''; };
+        const decode = s => String(s || '').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+        const title = decode(grab([/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i, /<title>([^<]+)<\/title>/i]));
+        const description = decode(grab([/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["']/i]));
+        let thumb = decode(grab([/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i, /<link[^>]+rel=["']image_src["'][^>]+href=["']([^"']+)["']/i]));
+        try { if (thumb) thumb = new URL(thumb, normalized).href; } catch(e) {}
+        let host=''; try { host = new URL(normalized).hostname.replace(/^www\./,''); } catch(e) {}
+        return { title: title || host || normalized, description, thumb, site: host, url: normalized };
+      } catch(e) { return null; }
+    }
+    async function saveMetaForEntry(itemId, url) {
+      const meta = await fetchPageMeta(url);
+      if (!meta) return;
+      const items = getManualEntries();
+      const idx = items.findIndex(x => String(x.id) === String(itemId));
+      if (idx < 0) return;
+      items[idx].title = meta.title || items[idx].title || '';
+      items[idx].thumb = meta.thumb || items[idx].thumb || '';
+      items[idx].description = meta.description || items[idx].description || '';
+      items[idx].site = meta.site || items[idx].site || '';
+      items[idx].meta = meta;
+      saveManualEntries(items);
     }
     function renderToyGrid() {
       qs('toyGrid').innerHTML = TOYS.map(t => `
@@ -297,8 +324,8 @@
       if (!items.length) { qs('results').innerHTML = '<div class="empty">No sessions match these filters.</div>'; return; }
       qs('results').innerHTML = items.map(s => {
         const m = metaFor(s.lastLink);
-        const thumb = m.thumb ? `<img src="${m.thumb}" alt="">` : '<div>Preview<br>pending</div>';
-        const title = m.title || 'Saved link';
+        const thumb = (s.thumb || m.thumb) ? `<img src="${escapeHtml(s.thumb || m.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '<div>Preview<br>pending</div>';
+        const title = s.title || m.title || 'Saved link';
         const tags = (s.toys||[]).length ? `<div class="tags">${s.toys.map(t => `<span class="tag">${escapeHtml(toyName(t))}</span>`).join('')}</div>` : '';
         const remarks = s.remarks ? `<div class="remarks">${escapeHtml(s.remarks)}</div>` : '';
         return `
@@ -309,6 +336,7 @@
                 <h3>${s.lastLink ? `<a href="${escapeHtml(s.lastLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>` : 'No link saved'}</h3>
                 <div class="meta">${escapeHtml(s.dateLabel)}${s.time ? ' · ' + escapeHtml(s.time) : ''} · Score: ${escapeHtml(s.score || '—')}${counts[s.dateISO] > 1 ? ' · multi-session day' : ''}</div>
                 <div class="meta">${s.lastLink ? escapeHtml(s.lastLink) : 'No URL stored'}</div>
+                ${m.description || s.description ? `<div class="meta">${escapeHtml(s.description || m.description)}</div>` : ''}
                 <div style="margin-top:8px"><button type="button" class="btn" onclick="beginEdit('${escapeHtml(s.id)}')">Edit</button></div>
               </div>
             </div>
@@ -318,17 +346,26 @@
       }).join('');
     }
     async function hydrateVisibleMetadata() {
-      const urls = [...new Set(allSessions().map(s => s.lastLink).filter(Boolean).slice(0,40))];
+      const items = getManualEntries();
+      const urls = [...new Set(items.map(s => s.lastLink).filter(Boolean).slice(0,80))];
       for (const url of urls) {
-        if (metaCache[url]?.hydrated) continue;
+        if (metaCache[url]?.hydrated && (metaCache[url].thumb || metaCache[url].title)) continue;
         try {
-          const res = await fetch('https://r.jina.ai/http://' + url.replace(/^https?:\/\//,''));
-          const text = await res.text();
-          const title = (text.match(/<title>(.*?)<\/title>/i)||[])[1] || metaCache[url]?.title || url;
-          const img = (text.match(/property=["']og:image["'][^>]*content=["']([^"']+)/i)||[])[1] || '';
-          metaCache[url] = { title: title.replace(/\s+/g,' ').trim(), thumb: img, href:url, hydrated:true };
-        } catch(e) { metaCache[url] = { ...(metaCache[url]||{}), hydrated:true }; }
+          const meta = await fetchPageMeta(url);
+          if (!meta) continue;
+          metaCache[url] = { ...(metaCache[url] || {}), ...meta, hydrated:true };
+          for (const s of items) {
+            if (normalizeUrl(s.lastLink) === normalizeUrl(url)) {
+              s.title = meta.title || s.title;
+              s.thumb = meta.thumb || s.thumb;
+              s.description = meta.description || s.description;
+              s.site = meta.site || s.site;
+              s.meta = meta;
+            }
+          }
+        } catch(e) {}
       }
+      saveManualEntries(items);
       if (qs('listScreen').classList.contains('active')) applyFilters();
     }
     renderToyGrid();
