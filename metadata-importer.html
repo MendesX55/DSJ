@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111111">
+  <title>Metadata Importer</title>
+  <style>
+    :root{--bg:#111;--card:#181818;--muted:#b8b8b8;--text:#f2f2f2;--accent:#7cc4ff;--line:#2a2a2a}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1100px;margin:0 auto;padding:20px}
+    h1{margin:0 0 10px;font-size:28px}
+    p{color:var(--muted);line-height:1.5}
+    .panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:14px 0}
+    input,button,textarea{font:inherit}
+    input[type=file],textarea{width:100%;box-sizing:border-box;background:#0f0f0f;color:var(--text);border:1px solid var(--line);border-radius:12px;padding:12px}
+    button{background:var(--accent);color:#06111a;border:0;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}
+    button.secondary{background:#262626;color:var(--text);border:1px solid var(--line)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .status{margin-top:10px;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-top:14px}
+    .item{background:#141414;border:1px solid var(--line);border-radius:16px;overflow:hidden}
+    .thumb{aspect-ratio:16/9;background:#202020;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+    .body{padding:12px}
+    .title{font-weight:700;line-height:1.3;margin:0 0 8px}
+    .meta{font-size:12px;color:var(--muted);line-height:1.4;word-break:break-word}
+    a{color:var(--accent)}
+    .small{font-size:12px;color:var(--muted)}
+    code{background:#101010;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Excel to Metadata JSON</h1>
+    <p>Upload an Excel file with a URL column, fetch page metadata, save it in browser local storage, and download a JSON file your HTML can read later.</p>
+
+    <div class="panel">
+      <div class="row">
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="processBtn">Process file</button>
+        <button id="exportBtn" class="secondary">Download JSON</button>
+        <button id="clearBtn" class="secondary">Clear local storage</button>
+      </div>
+      <div id="status" class="status">Waiting for a file.</div>
+    </div>
+
+    <div class="panel">
+      <div><strong>Preview</strong></div>
+      <div id="count" class="small">0 items</div>
+      <div id="results" class="grid"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script>
+  const LS_KEY = 'url_metadata_cache_v1';
+  let records = [];
+
+  const $ = id => document.getElementById(id);
+  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const normalizeUrl = u => {
+    let s = String(u ?? '').trim();
+    if (!s) return '';
+    if (!/^https?:\/\//i.test(s)) s = 'https://' + s.replace(/^\/+/, '');
+    return s;
+  };
+  const saveCache = () => localStorage.setItem(LS_KEY, JSON.stringify(records));
+  const loadCache = () => {
+    try { records = JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { records = []; }
+    render();
+  };
+
+  function setStatus(msg) { $('status').textContent = msg; }
+
+  async function fetchMeta(url) {
+    const finalUrl = normalizeUrl(url);
+    if (!finalUrl) return null;
+    const endpoint = 'https://r.jina.ai/http://' + finalUrl.replace(/^https?:\/\//,'');
+    const text = await fetch(endpoint, { cache:'no-store' }).then(r => r.text());
+    const pick = (arr) => { for (const re of arr) { const m = text.match(re); if (m && m[1]) return m[1].trim(); } return ''; };
+    const decode = s => String(s || '').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+    let title = decode(pick([/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i, /<title>([^<]+)<\/title>/i]));
+    let description = decode(pick([/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["']/i]));
+    let thumb = decode(pick([/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i, /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i, /<link[^>]+rel=["']image_src["'][^>]+href=["']([^"']+)["']/i]));
+    let site = '';
+    try { site = new URL(finalUrl).hostname.replace(/^www\./,''); } catch {}
+    try { if (thumb) thumb = new URL(thumb, finalUrl).href; } catch {}
+    if (!title) title = site || finalUrl;
+    return { url: finalUrl, title, description, thumb, site, fetchedAt: new Date().toISOString() };
+  }
+
+  async function processRows(rows) {
+    const urlCols = ['url','link','links','video','site','source'];
+    const found = [];
+    for (const row of rows) {
+      const keys = Object.keys(row);
+      const key = keys.find(k => urlCols.includes(String(k).toLowerCase())) || keys[0];
+      const rawUrl = row[key];
+      const url = normalizeUrl(rawUrl);
+      if (url) found.push({ raw: row, url });
+    }
+    setStatus(`Found ${found.length} URLs. Fetching metadata...`);
+    const out = [];
+    for (let i=0; i<found.length; i++) {
+      const item = found[i];
+      try {
+        const meta = await fetchMeta(item.url);
+        out.push({ ...item.raw, ...meta });
+        setStatus(`Fetched ${i+1}/${found.length}`);
+        render(out.concat(records.filter(r => !out.some(x => x.url === r.url))));
+      } catch (e) {
+        const fallback = { url: item.url, title: item.url, description: '', thumb: '', site: '', fetchedAt: new Date().toISOString(), error: String(e) };
+        out.push({ ...item.raw, ...fallback });
+      }
+    }
+    records = out;
+    saveCache();
+    render();
+    setStatus(`Done. Saved ${records.length} items to localStorage.`);
+  }
+
+  function render(list = records) {
+    $('count').textContent = `${list.length} items`;
+    $('results').innerHTML = list.map(r => `
+      <div class="item">
+        <div class="thumb">${r.thumb ? `<img src="${escapeHtml(r.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<div class="small">No thumbnail</div>'}</div>
+        <div class="body">
+          <div class="title">${escapeHtml(r.title || r.url || 'Untitled')}</div>
+          <div class="meta">${escapeHtml(r.site || '')}</div>
+          <div class="meta">${escapeHtml(r.description || '')}</div>
+          <div class="meta"><a href="${escapeHtml(r.url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.url || '')}</a></div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function handleFile(file) {
+    if (!file) return;
+    const buf = await file.arrayBuffer();
+    let rows = [];
+    if (/\.csv$/i.test(file.name)) {
+      const text = new TextDecoder().decode(buf);
+      rows = XLSX.utils.sheet_to_json(XLSX.read(text, { type:'string' }).Sheets[XLSX.read(text, { type:'string' }).SheetNames[0]]);
+    } else {
+      const wb = XLSX.read(buf, { type:'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    }
+    await processRows(rows);
+  }
+
+  $('processBtn').onclick = async () => { const f = $('fileInput').files[0]; if (f) await handleFile(f); else setStatus('Choose an Excel file first.'); };
+  $('exportBtn').onclick = () => {
+    const blob = new Blob([JSON.stringify(records, null, 2)], { type:'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'metadata.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  $('clearBtn').onclick = () => { localStorage.removeItem(LS_KEY); records = []; render(); setStatus('localStorage cleared.'); };
+  $('fileInput').addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+  loadCache();
+  </script>
+</body>
+</html>
